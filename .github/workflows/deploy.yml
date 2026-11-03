@@ -1,0 +1,105 @@
+name: Deploy MyTube distribution
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mytube-pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out distribution files only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify distribution integrity and media manifest
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import hashlib, json, re
+          root = Path('site')
+          release = json.loads((root/'release.json').read_text())
+          assert release['version'] == 'season-02'
+          actual = {str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()}
+          assert actual == set(release['files']) | {'release.json'}
+          forbidden = {'.git', '.env', 'src', 'scripts', 'node_modules', 'package.json', 'package-lock.json'}
+          for name, digest in release['files'].items():
+              path = root/name
+              assert not forbidden.intersection(Path(name).parts)
+              assert path.suffix != '.map'
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+              if path.suffix in {'.js', '.html', '.css', '.json', '.svg', '.md'}:
+                  assert not re.search(r'AKIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----', path.read_text())
+          manifest = json.loads((root/'media/manifest.json').read_text())
+          assert len(manifest) == 12
+          for clip in manifest:
+              assert clip['audio'] == 'aac' and clip['motion'] and float(clip['duration']) >= 15.9
+              for ext in ('mp4', 'svg'):
+                  assert (root/f"media/{clip['id']}.{ext}").is_file()
+          html = (root/'index.html').read_text()
+          assert '/mytube-pages/assets/' in html
+          print('Verified distribution integrity, secret patterns, and 12 animated sound films')
+          PYTHON
+      - name: Upload only built website files
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure existing Pages site
+        uses: actions/configure-pages@v5
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify published application and all media
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, time, urllib.request
+          base = os.environ['PAGE_URL'].rstrip('/') + '/'
+          def fetch(path):
+              for attempt in range(6):
+                  try:
+                      with urllib.request.urlopen(base + path, timeout=30) as response:
+                          assert response.status == 200
+                          return response.read()
+                  except Exception:
+                      if attempt == 5: raise
+                      time.sleep(5)
+          html = fetch('').decode()
+          assert 'MyTube' in html
+          assets = re.findall(r'(?:src|href)="(/mytube-pages/assets/[^"]+)"', html)
+          assert len(assets) >= 2
+          for asset in assets:
+              fetch(asset.removeprefix('/mytube-pages/'))
+          manifest = json.loads(fetch('media/manifest.json'))
+          assert len(manifest) == 12
+          for clip in manifest:
+              assert clip['audio'] == 'aac' and clip['motion'] and float(clip['duration']) >= 15.9
+              for extension in ('svg', 'mp4'):
+                  fetch(f"media/{clip['id']}.{extension}")
+          print('HTTP 200: homepage, JS/CSS and all 24 media files; Season 02 audio/motion manifest verified')
+          print('Verified public URL:', base)
+          PY
