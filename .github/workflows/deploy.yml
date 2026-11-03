@@ -1,0 +1,118 @@
+name: Deploy MyTube (private source to public Pages)
+
+on:
+  push:
+    branches: [master, release/rich-site]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mytube-pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out verified private source
+        uses: actions/checkout@v4
+        with:
+          repository: t-wakasa/mytube
+          # Reviewed and tested Season 02 commit; source remains private.
+          ref: 62013ff7eb25e9e859f2c97f94455b9c8118e7a3
+          path: source
+          token: ${{ secrets.MYTUBE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install, typecheck and test
+        working-directory: source
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+      - name: Set up ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+      - name: Generate animated sound films and build
+        working-directory: source
+        run: |
+          npm run build
+          npm run check:pages
+      - name: Check distribution contains no source or credential files
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('dist')
+          forbidden = {'.git', '.env', 'node_modules', 'src', 'scripts', 'work', 'package.json', 'package-lock.json'}
+          patterns = re.compile(r'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
+          for path in root.rglob('*'):
+              assert not forbidden.intersection(path.relative_to(root).parts), f'Unexpected deployment path: {path}'
+              assert path.suffix != '.map', 'Source maps must not be published'
+              if path.is_file() and path.suffix in {'.js', '.html', '.css', '.json', '.svg', '.md'}:
+                  assert not patterns.search(path.read_text()), f'Potential credential in {path}'
+          print('Distribution-only and credential checks passed')
+          PY
+      - name: Upload only built website files
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: source/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure existing Pages site
+        uses: actions/configure-pages@v5
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Verify published application and all media
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, time, urllib.request
+          base = os.environ['PAGE_URL'].rstrip('/') + '/'
+          def fetch(path):
+              for attempt in range(6):
+                  try:
+                      with urllib.request.urlopen(base + path, timeout=30) as response:
+                          assert response.status == 200
+                          return response.read()
+                  except Exception:
+                      if attempt == 5: raise
+                      time.sleep(5)
+          html = fetch('').decode()
+          assert 'MyTube' in html
+          assets = re.findall(r'(?:src|href)="(/mytube-pages/assets/[^"]+)"', html)
+          assert len(assets) >= 2
+          for asset in assets:
+              fetch(asset.removeprefix('/mytube-pages/'))
+          manifest = json.loads(fetch('media/manifest.json'))
+          assert len(manifest) == 12
+          for clip in manifest:
+              assert clip['audio'] == 'aac' and clip['motion'] and float(clip['duration']) >= 15.9
+              for extension in ('svg', 'mp4'):
+                  fetch(f"media/{clip['id']}.{extension}")
+          print('HTTP 200: homepage, JS/CSS and all 24 media files; Season 02 audio/motion manifest verified')
+          print('Verified public URL:', base)
+          PY
