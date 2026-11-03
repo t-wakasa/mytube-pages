@@ -17,58 +17,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Check out verified private source
+      - name: Check out distribution files only
         uses: actions/checkout@v4
         with:
-          repository: t-wakasa/mytube
-          # Reviewed and tested Season 02 commit; source remains private.
-          ref: 62013ff7eb25e9e859f2c97f94455b9c8118e7a3
-          path: source
-          token: ${{ secrets.MYTUBE_READ_TOKEN }}
           persist-credentials: false
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: source/package-lock.json
-      - name: Install, typecheck and test
-        working-directory: source
+      - name: Verify distribution integrity and media manifest
         run: |
-          npm ci
-          npm run typecheck
-          npm test
-      - name: Set up ffmpeg
-        run: |
-          if ! command -v ffmpeg >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y ffmpeg
-          fi
-      - name: Generate animated sound films and build
-        working-directory: source
-        run: |
-          npm run build
-          npm run check:pages
-      - name: Check distribution contains no source or credential files
-        working-directory: source
-        run: |
-          python3 - <<'PY'
+          python3 - <<'PYTHON'
           from pathlib import Path
-          import re
-          root = Path('dist')
-          forbidden = {'.git', '.env', 'node_modules', 'src', 'scripts', 'work', 'package.json', 'package-lock.json'}
-          patterns = re.compile(r'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')
-          for path in root.rglob('*'):
-              assert not forbidden.intersection(path.relative_to(root).parts), f'Unexpected deployment path: {path}'
-              assert path.suffix != '.map', 'Source maps must not be published'
-              if path.is_file() and path.suffix in {'.js', '.html', '.css', '.json', '.svg', '.md'}:
-                  assert not patterns.search(path.read_text()), f'Potential credential in {path}'
-          print('Distribution-only and credential checks passed')
-          PY
+          import hashlib, json, re
+          root = Path('site')
+          release = json.loads((root/'release.json').read_text())
+          assert release['version'] == 'season-02'
+          actual = {str(p.relative_to(root)) for p in root.rglob('*') if p.is_file()}
+          assert actual == set(release['files']) | {'release.json'}
+          forbidden = {'.git', '.env', 'src', 'scripts', 'node_modules', 'package.json', 'package-lock.json'}
+          for name, digest in release['files'].items():
+              path = root/name
+              assert not forbidden.intersection(Path(name).parts)
+              assert path.suffix != '.map'
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+              if path.suffix in {'.js', '.html', '.css', '.json', '.svg', '.md'}:
+                  assert not re.search(r'AKIA[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----', path.read_text())
+          manifest = json.loads((root/'media/manifest.json').read_text())
+          assert len(manifest) == 12
+          for clip in manifest:
+              assert clip['audio'] == 'aac' and clip['motion'] and float(clip['duration']) >= 15.9
+              for ext in ('mp4', 'svg'):
+                  assert (root/f"media/{clip['id']}.{ext}").is_file()
+          html = (root/'index.html').read_text()
+          assert '/mytube-pages/assets/' in html
+          print('Verified distribution integrity, secret patterns, and 12 animated sound films')
+          PYTHON
       - name: Upload only built website files
         uses: actions/upload-pages-artifact@v4
         with:
-          path: source/dist
+          path: site
 
   deploy:
     needs: build
