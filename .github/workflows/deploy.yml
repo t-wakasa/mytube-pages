@@ -1,6 +1,9 @@
 name: Deploy MyTube (private source to public Pages)
 
 on:
+  push:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
