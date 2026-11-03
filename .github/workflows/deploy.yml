@@ -1,8 +1,10 @@
-name: Deploy MyTube (private source to public Pages)
+name: Deploy MyTube distribution
 
 on:
   push:
-    branches: [master, release/rich-site]
+    branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -55,6 +57,7 @@ jobs:
           path: site
 
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: build
     runs-on: ubuntu-latest
     permissions:

@@ -12,8 +12,9 @@ Season 02: 特集ヒーロー・並べ替え・表示切り替え・再生速度
 
 Actionsは配信物の整合性を確認し、`site/` だけをGitHub Pagesへ公開します。
 Privateソースの読み取りトークンは不要です。既定のGITHUB_TOKENだけを使用します。
-`release/rich-site` とmasterへのpushが公開対象です。masterへの直接pushや強制pushは行いません。
-ワークフローをmasterへ残す場合はPull Requestをレビューしてマージできます。
+Pull Requestでは配信物を検証し、masterへのマージ後に自動公開します。
+既存のgithub-pages保護ルールにより、master以外からはデプロイしません。
+masterへの直接pushや強制pushは行いません。
 
 公開されたJS・CSS・画像・動画は、通常のWebサイトと同様に閲覧者が取得できます。
 元のTypeScript・テスト・生成スクリプト・ソースマップは配信しません。
